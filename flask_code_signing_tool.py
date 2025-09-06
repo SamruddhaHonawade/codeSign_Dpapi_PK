@@ -1,172 +1,186 @@
-from flask import Flask, request, render_template, url_for, send_from_directory
-from pathlib import Path
-from datetime import datetime, timedelta
-import json, traceback
-
-# cryptography imports
-from cryptography import x509
-from cryptography.x509.oid import NameOID
+import os
+import datetime
+from flask import Flask, render_template, request, send_from_directory, url_for
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
-from cryptography.hazmat.primitives.asymmetric.ec import ECDSA
-from cryptography.hazmat.primitives.serialization import load_pem_private_key, load_pem_public_key
+from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
+from cryptography.hazmat.backends import default_backend
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 
 app = Flask(__name__)
-app.secret_key = "dev-secret-key"
+app.config["UPLOAD_FOLDER"] = "uploads"
+app.config["CERT_FOLDER"] = "certs"
+app.config["SIG_FOLDER"] = "signatures"
 
-BASE = Path('.')
-UPLOADS, CERTS, SIGS = BASE/"uploads", BASE/"certs", BASE/"sigs"
-for d in (UPLOADS, CERTS, SIGS):
-    d.mkdir(exist_ok=True)
+# Ensure dirs exist
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+os.makedirs(app.config["CERT_FOLDER"], exist_ok=True)
+os.makedirs(app.config["SIG_FOLDER"], exist_ok=True)
 
-# ------------------ Helpers ------------------
 
-def _hash_obj_from_name(name: str):
-    n = (name or '').upper()
-    if 'SHA3-512' in n: return hashes.SHA3_512()
-    if 'SHA3-256' in n: return hashes.SHA3_256()
-    return hashes.SHA256()
-
-def _generate_self_signed(org, algo, days=7):
-    if algo.upper() == "RSA":
-        priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+def generate_self_signed_cert(org_name, enc_algo, hash_algo):
+    """Generate self-signed cert + private key"""
+    if enc_algo == "RSA":
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     else:
-        priv = ec.generate_private_key(ec.SECP384R1())
+        key = ec.generate_private_key(ec.SECP256R1())
 
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, org),
-        x509.NameAttribute(NameOID.COMMON_NAME, org),
+        x509.NameAttribute(NameOID.COUNTRY_NAME, "IN"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, org_name or "DemoOrg"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "codesigner.local"),
     ])
 
-    now = datetime.utcnow()
-    cert = (x509.CertificateBuilder()
-        .subject_name(subject).issuer_name(issuer)
-        .public_key(priv.public_key())
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now - timedelta(minutes=1))
-        .not_valid_after(now + timedelta(days=days))
-        .sign(priv, hashes.SHA256()))
+        .not_valid_before(datetime.datetime.utcnow())
+        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=7))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(private_key=key, algorithm=hashes.SHA256())
+    )
 
-    fname = f"{org.replace(' ','_')}_{int(now.timestamp())}.pem"
-    out_path = CERTS / fname
-    pem_key = priv.private_bytes(
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption()
+        encryption_algorithm=serialization.NoEncryption(),
     )
-    pem_cert = cert.public_bytes(serialization.Encoding.PEM)
-    out_path.write_bytes(pem_key + pem_cert)
-    return priv, out_path, cert
 
-def _save_uploaded_file(fs, dest):
-    out = dest / fs.filename
-    fs.save(out)
-    return out
+    cert_path = os.path.join(app.config["CERT_FOLDER"], "certificate.pem")
+    key_path = os.path.join(app.config["CERT_FOLDER"], "private_key.pem")
 
-def _load_private_key(pem: bytes):
-    try: return load_pem_private_key(pem, password=None)
-    except: return None
+    with open(cert_path, "wb") as f: f.write(cert_pem)
+    with open(key_path, "wb") as f: f.write(key_pem)
 
-def _load_cert(pem: bytes):
-    try: return x509.load_pem_x509_certificate(pem)
-    except: return None
+    return cert_path, key_path
 
-def _sign(priv, data: bytes, algo, hname):
-    h = _hash_obj_from_name(hname)
-    return priv.sign(data, padding.PKCS1v15(), h) if algo.upper()=="RSA" else priv.sign(data, ECDSA(h))
 
-def _verify(pub, data: bytes, sig: bytes, algo, hname):
-    h = _hash_obj_from_name(hname)
+def sign_file(file_path, key_path, hash_algo, enc_algo):
+    """Sign file with private key"""
+    with open(file_path, "rb") as f:
+        data = f.read()
+    with open(key_path, "rb") as f:
+        private_key = serialization.load_pem_private_key(f.read(), password=None)
+
+    digest_algo = hashes.SHA256() if hash_algo == "SHA-256" else hashes.SHA3_256()
+    hasher = hashes.Hash(digest_algo)
+    hasher.update(data)
+    digest = hasher.finalize()
+
+    if enc_algo == "RSA":
+        signature = private_key.sign(digest, padding.PKCS1v15(), Prehashed(digest_algo))
+    else:
+        signature = private_key.sign(digest, ec.ECDSA(Prehashed(digest_algo)))
+
+    sig_path = os.path.join(app.config["SIG_FOLDER"], os.path.basename(file_path) + ".sig")
+    with open(sig_path, "wb") as f: f.write(signature)
+
+    return sig_path
+
+
+def verify_signature(file_path, cert_path, sig_path, hash_algo, enc_algo):
+    """Verify signature using public key in cert"""
+    with open(file_path, "rb") as f: data = f.read()
+    with open(sig_path, "rb") as f: signature = f.read()
+    with open(cert_path, "rb") as f: cert = x509.load_pem_x509_certificate(f.read())
+    public_key = cert.public_key()
+
+    digest_algo = hashes.SHA256() if hash_algo == "SHA-256" else hashes.SHA3_256()
+    hasher = hashes.Hash(digest_algo)
+    hasher.update(data)
+    digest = hasher.finalize()
+
     try:
-        if algo.upper()=="RSA":
-            pub.verify(sig, data, padding.PKCS1v15(), h)
+        if enc_algo == "RSA":
+            public_key.verify(signature, digest, padding.PKCS1v15(), Prehashed(digest_algo))
         else:
-            pub.verify(sig, data, ECDSA(h))
-        return True, None
-    except Exception as e:
-        return False, str(e)
+            public_key.verify(signature, digest, ec.ECDSA(Prehashed(digest_algo)))
+        return True
+    except Exception:
+        return False
 
-# ------------------ Routes ------------------
 
-@app.route('/')
+@app.route("/", methods=["GET"])
 def index():
     return render_template("index.html")
 
-@app.route('/certs/<path:fn>')
-def dl_cert(fn): return send_from_directory(str(CERTS), fn, as_attachment=True)
 
-@app.route('/uploads/<path:fn>')
-def dl_upload(fn): return send_from_directory(str(UPLOADS), fn, as_attachment=True)
-
-@app.route('/sigs/<path:fn>')
-def dl_sig(fn): return send_from_directory(str(SIGS), fn, as_attachment=True)
-
-@app.route('/sign', methods=['POST'])
+@app.route("/sign", methods=["POST"])
 def sign():
-    try:
-        file = request.files['file']
-        saved = _save_uploaded_file(file, UPLOADS)
-        algo, hname = request.form['enc_algo'], request.form['hash_algo']
-        mode, org = request.form['cert_mode'], request.form['org_name']
+    file = request.files.get("file")
+    cert_mode = request.form.get("cert_mode")
+    org_name = request.form.get("org_name")
+    hash_algo = request.form.get("hash_algo")
+    enc_algo = request.form.get("enc_algo")
 
-        if mode == "generate":
-            priv, cert_path, cert = _generate_self_signed(org, algo)
-        else:
-            cert_file = request.files['certificate']
-            cert_path = _save_uploaded_file(cert_file, CERTS)
-            pem = cert_path.read_bytes()
-            priv, cert = _load_private_key(pem), _load_cert(pem)
+    if not file: return render_template("index.html", sign_status="❌ No file uploaded", sign_ok=False)
 
-        if priv is None: raise ValueError("No private key available.")
+    file_path = os.path.join(app.config["UPLOAD_FOLDER"], file.filename)
+    file.save(file_path)
 
-        sig = _sign(priv, saved.read_bytes(), algo, hname)
-        sig_path = SIGS / (saved.name + ".sig")
-        sig_path.write_bytes(sig)
+    # Generate or use uploaded cert
+    if cert_mode == "generate":
+        cert_path, key_path = generate_self_signed_cert(org_name, enc_algo, hash_algo)
+    else:
+        cert = request.files.get("certificate")
+        cert_path = os.path.join(app.config["CERT_FOLDER"], "uploaded_cert.pem")
+        cert.save(cert_path)
+        key_path = os.path.join(app.config["CERT_FOLDER"], "private_key.pem")
 
-        meta = {
-            "file": saved.name, "signature": sig_path.name,
-            "cert": cert_path.name, "enc_algo": algo, "hash_algo": hname,
-            "signed_at": datetime.utcnow().isoformat()+"Z"
-        }
-        (UPLOADS/(saved.name+".meta.json")).write_text(json.dumps(meta, indent=2))
+    sig_path = sign_file(file_path, key_path, hash_algo, enc_algo)
 
-        return render_template("index.html",
-                               sign_status="File signed successfully ✅",
-                               cert_name=cert_path.name, sig_name=sig_path.name)
-    except Exception as e:
-        return render_template("index.html", sign_status=f"Error: {e}")
+    return render_template(
+        "index.html",
+        sign_status="✅ File signed successfully",
+        sign_ok=True,
+        cert_link=url_for("download_cert", filename=os.path.basename(cert_path)),
+        sig_link=url_for("download_sig", filename=os.path.basename(sig_path)),
+        cert_name=os.path.basename(cert_path),
+        sig_name=os.path.basename(sig_path),
+    )
 
-@app.route('/verify', methods=['POST'])
+
+@app.route("/verify", methods=["POST"])
 def verify():
-    try:
-        vf, vc, vs = request.files['verify_file'], request.files['verify_cert'], request.files['verify_sig']
-        vf_path, vc_path, vs_path = _save_uploaded_file(vf, UPLOADS), _save_uploaded_file(vc, CERTS), _save_uploaded_file(vs, SIGS)
+    file = request.files.get("verify_file")
+    cert = request.files.get("verify_cert")
+    sig = request.files.get("verify_sig")
 
-        cert_bytes = vc_path.read_bytes()
-        cert, pub = _load_cert(cert_bytes), None
-        publisher, valid_until = None, None
-        if cert:
-            pub, publisher, valid_until = cert.public_key(), cert.subject.rfc4514_string(), cert.not_valid_after
-        else:
-            priv = _load_private_key(cert_bytes)
-            pub = priv.public_key() if priv else load_pem_public_key(cert_bytes)
+    if not (file and cert and sig):
+        return render_template("index.html", verify_status="❌ Missing file/cert/sig", verify_ok=False)
 
-        data, sig = vf_path.read_bytes(), vs_path.read_bytes()
-        meta_file = UPLOADS/(vf_path.name+".meta.json")
-        enc, h = "RSA","SHA-256"
-        if meta_file.exists():
-            meta=json.loads(meta_file.read_text())
-            enc,h=meta["enc_algo"],meta["hash_algo"]
+    file_path = os.path.join(app.config["UPLOAD_FOLDER"], file.filename)
+    cert_path = os.path.join(app.config["CERT_FOLDER"], cert.filename)
+    sig_path = os.path.join(app.config["SIG_FOLDER"], sig.filename)
 
-        ok,_ = _verify(pub,data,sig,enc,h)
-        if not ok: return render_template("index.html", verify_status="Signature INVALID ❌")
+    file.save(file_path)
+    cert.save(cert_path)
+    sig.save(sig_path)
 
-        ts = datetime.utcnow().isoformat()+"Z"
-        return render_template("index.html",
-                               verify_status=f"Signature VALID ✅ at {ts}",
-                               publisher=publisher, valid_until=valid_until, enc_algo=enc, hash_algo=h)
-    except Exception as e:
-        return render_template("index.html", verify_status=f"Error: {e}")
+    # Defaulting to SHA-256/RSA for verify (could be extended to detect from cert)
+    valid = verify_signature(file_path, cert_path, sig_path, "SHA-256", "RSA")
+
+    return render_template(
+        "index.html",
+        verify_status="✅ Signature is VALID" if valid else "❌ Signature is INVALID",
+        verify_ok=valid,
+    )
+
+
+@app.route("/certs/<filename>")
+def download_cert(filename):
+    return send_from_directory(app.config["CERT_FOLDER"], filename, as_attachment=True)
+
+
+@app.route("/signatures/<filename>")
+def download_sig(filename):
+    return send_from_directory(app.config["SIG_FOLDER"], filename, as_attachment=True)
+
 
 if __name__ == "__main__":
     app.run(debug=True)
