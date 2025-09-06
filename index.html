@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en" x-data="{ tab: 'sign' }" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="UTF-8">
+  <title>Code Signing Tool</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/alpinejs" defer></script>
+</head>
+<body class="bg-gray-100 min-h-screen flex justify-center py-10">
+  <div class="w-full max-w-4xl bg-white shadow-lg rounded-2xl p-6">
+    <h1 class="text-2xl font-bold mb-4">🔐 Code Signing Tool</h1>
+
+    <!-- Tabs -->
+    <div class="flex border-b mb-6">
+      <button class="px-4 py-2" :class="tab==='sign'?'border-b-2 border-indigo-600 text-indigo-600':''" @click="tab='sign'">Sign File</button>
+      <button class="px-4 py-2" :class="tab==='verify'?'border-b-2 border-indigo-600 text-indigo-600':''" @click="tab='verify'">Verify Signature</button>
+    </div>
+
+    <!-- Sign Form -->
+    <form x-show="tab==='sign'" action="{{ url_for('sign') }}" method="post" enctype="multipart/form-data" class="space-y-4">
+      <input type="file" name="file" required class="block w-full border p-2 rounded" />
+      <div>
+        <label class="block mb-1">Certificate Mode</label>
+        <select name="cert_mode" class="border p-2 rounded w-full">
+          <option value="generate">Generate New (7 days)</option>
+          <option value="upload">Upload Existing</option>
+        </select>
+      </div>
+      <div>
+        <label class="block mb-1">Organization / Publisher</label>
+        <input type="text" name="org_name" class="border p-2 rounded w-full" value="My Organization" />
+      </div>
+      <input type="file" name="certificate" class="block w-full border p-2 rounded" />
+      <div class="grid grid-cols-2 gap-4">
+        <select name="hash_algo" class="border p-2 rounded">
+          <option>SHA-256</option>
+          <option selected>SHA3-256</option>
+          <option>SHA3-512</option>
+        </select>
+        <select name="enc_algo" class="border p-2 rounded">
+          <option>RSA</option>
+          <option>ECDSA</option>
+        </select>
+      </div>
+      <button class="bg-indigo-600 text-white px-4 py-2 rounded">SIGN FILE</button>
+
+      {% if sign_status %}
+      <div class="mt-4 p-3 rounded bg-green-50 border border-green-200 text-green-700">
+        {{ sign_status }}
+        {% if cert_name %}<div>Cert: {{ cert_name }}</div>{% endif %}
+        {% if sig_name %}<div>Signature: {{ sig_name }}</div>{% endif %}
+      </div>
+      {% endif %}
+    </form>
+
+    <!-- Verify Form -->
+    <form x-show="tab==='verify'" action="{{ url_for('verify') }}" method="post" enctype="multipart/form-data" class="space-y-4">
+      <input type="file" name="verify_file" required class="block w-full border p-2 rounded" />
+      <input type="file" name="verify_cert" required class="block w-full border p-2 rounded" />
+      <input type="file" name="verify_sig" required class="block w-full border p-2 rounded" />
+      <button class="bg-gray-700 text-white px-4 py-2 rounded">VERIFY</button>
+
+      {% if verify_status %}
+      <div class="mt-4 p-3 rounded {{ 'bg-green-50 border-green-200 text-green-700' if 'VALID' in verify_status else 'bg-red-50 border-red-200 text-red-700' }}">
+        {{ verify_status }}
+        {% if publisher %}<div>Publisher: {{ publisher }}</div>{% endif %}
+        {% if valid_until %}<div>Valid Until: {{ valid_until }}</div>{% endif %}
+        {% if enc_algo and hash_algo %}<div>Algo: {{ enc_algo }} / {{ hash_algo }}</div>{% endif %}
+      </div>
+      {% endif %}
+    </form>
+  </div>
+</body>
+</html>
