@@ -1,3 +1,4 @@
+
 import os
 import json
 import zipfile
@@ -11,40 +12,26 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.backends import default_backend
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
-from signing import generate_keypair, sign_digest, verify_signature, load_private_key
+import win32crypt  # for Windows DPAPI
+
+#  backend modules
+from signing import generate_keypair, sign_digest, load_private_key
 from hashing import compute_sha3_256, compute_sha3_512
 from certificate import create_self_signed_cert
-import time
-import threading
-import re
 
-def check_password_strength(password):
-    """Returns a tuple (is_strong, message) for password strength."""
-    if len(password) < 8:
-        return False, "Password must be at least 8 characters."
-    if not re.search(r"[A-Z]", password):
-        return False, "Password must contain at least one uppercase letter."
-    if not re.search(r"[a-z]", password):
-        return False, "Password must contain at least one lowercase letter."
-    if not re.search(r"[0-9]", password):
-        return False, "Password must contain at least one digit."
-    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
-        return False, "Password must contain at least one special character."
-    return True, "Strong password."
-
+# GUI
 class CodeSignerApp(tb.Window):
     def __init__(self):
         super().__init__(themename="cyborg")
-        self.sign_hash_algo_var = None
-        self.title("🔐Code Signing Tool")
-        self.attributes('-fullscreen', True)
+        self.title("🔐 Code Signing Tool")
+        self.geometry("1000x700")  # Set default window size
+        self.resizable(True, True)  # Make window resizable
 
         self.file_path = None
         self.zip_path = None
         self.private_key = None
         self.key_path = None
-        self.key_lock_until = None
-        self.lock_timer_label = None  # Add this line
+        self.hash_algo_var = None  # For hash algorithm selection
 
         self._create_widgets()
 
@@ -68,17 +55,23 @@ class CodeSignerApp(tb.Window):
         self.log_box.pack(fill=X, padx=15, pady=(0, 10))
 
     def _create_key_tab(self, parent):
+        # Key status
         self.key_status = tb.Label(parent, text="No key loaded", bootstyle="warning")
         self.key_status.pack(pady=10)
 
+        # Load existing key
         tb.Button(parent, text="Load Existing Key", bootstyle="primary",
                   command=self.load_key).pack(pady=5)
 
+        # Generate new key section
         tb.Label(parent, text="Generate New Key", font=("Helvetica", 10, "bold")).pack(pady=(20, 5))
+
+        tb.Label(parent, text="Select Algorithm").pack(pady=(5, 5))
         self.algo_var = tk.StringVar(value="RSA")
-        tb.Combobox(parent, textvariable=self.algo_var, values=["RSA", "ECDSA"],
+        tb.Combobox(parent, textvariable=self.algo_var, values=["RSA(2048)- Fast and Secured", "RSA(4096)- Slow and Higly Secured", "ECDSA(256)-Fast and Secured","ECDSA(512)-Slow and Higly Secured"],
                     state="readonly", width=20).pack()
 
+        # Signer details
         details_frame = tb.LabelFrame(parent, text="Signer Details", bootstyle="info")
         details_frame.pack(pady=10, padx=10, fill=X)
 
@@ -130,11 +123,11 @@ class CodeSignerApp(tb.Window):
         self.file_label.pack(pady=10)
         tb.Button(parent, text="Choose File", bootstyle="primary", command=self.choose_file).pack()
 
-        tb.Label(parent, text="Select Hash Algorithm for Signing", font=("Helvetica", 10, "bold")).pack(pady=(20, 5))
-        self.sign_hash_algo_var = tk.StringVar(value="SHA3-256")
-        tb.Combobox(parent, textvariable=self.sign_hash_algo_var, 
-                    values=["SHA3-256", "SHA3-512"], 
-                    state="readonly", width=20).pack(pady=5)
+        # Hash algorithm selection
+        tb.Label(parent, text="Select Hash Algorithm").pack(pady=(10, 5))
+        self.hash_algo_var = tk.StringVar(value="SHA3-256")
+        tb.Combobox(parent, textvariable=self.hash_algo_var, values=["SHA3-256", "SHA3-512"],
+                    state="readonly", width=20).pack()
 
         tb.Button(parent, text="Sign & Create ZIP", bootstyle="success", command=self.sign_file).pack(pady=20)
         self.sign_status = tb.Label(parent, text="", bootstyle="info")
@@ -148,6 +141,7 @@ class CodeSignerApp(tb.Window):
         self.verify_status = tb.Label(parent, text="", bootstyle="warning")
         self.verify_status.pack()
 
+        # Details display
         self.details_text = scrolledtext.ScrolledText(parent, height=10, wrap=tk.WORD)
         self.details_text.pack(pady=10, fill=BOTH, expand=True)
         self.details_text.config(state=tk.DISABLED)
@@ -158,60 +152,31 @@ class CodeSignerApp(tb.Window):
 
     def load_key(self):
         try:
-            # Check lockout
-            if self.key_lock_until and time.time() < self.key_lock_until:
-                if not self.lock_timer_label:
-                    self.lock_timer_label = tb.Label(self, text="", bootstyle="danger")
-                    self.lock_timer_label.pack(pady=5)
-                self.update_lock_timer()
-                messagebox.showwarning("Locked", "Too many incorrect password attempts. Please wait until unlock.")
-                self.log("Key loading locked due to too many incorrect password attempts.")
-                return
-            elif self.lock_timer_label:
-                self.lock_timer_label.destroy()
-                self.lock_timer_label = None
-
-            desktop_path = os.path.expanduser("~/Desktop")
             key_path = filedialog.askopenfilename(
-                title="Select private key file",
-                initialdir=desktop_path,
-                filetypes=[("PEM files", "*.pem")]
+                title="Select protected private key file",
+                filetypes=[("Key files", "*.key")]
             )
             if not key_path:
+                self.log("Key selection cancelled.")
                 return
 
-            attempts = 0
-            max_attempts = 3
-            while attempts < max_attempts:
-                password_str = simpledialog.askstring(
-                    "Enter Password",
-                    f"Enter password for the private key (attempt {attempts+1}/{max_attempts}, leave blank if none):",
-                    show='*'
-                )
-                if password_str is None:
-                    return
-                password = password_str.encode() if password_str else None
+            # Read encrypted data
+            with open(key_path, "rb") as key_file:
+                encrypted_pem = key_file.read()
 
-                try:
-                    self.private_key = load_private_key(key_path, password)
-                    break  # Success
-                except Exception as e:
-                    attempts += 1
-                    if attempts < max_attempts:
-                        messagebox.showerror("Incorrect Password", f"Incorrect password. {max_attempts - attempts} attempt(s) left.")
-                    else:
-                        self.key_lock_until = time.time() + 5 * 60  # 5 minutes lock
-                        if not self.lock_timer_label:
-                            self.lock_timer_label = tb.Label(self, text="", bootstyle="danger")
-                            self.lock_timer_label.pack(pady=5)
-                        self.update_lock_timer()
-                        messagebox.showerror("Locked", "Too many incorrect attempts. Locked for 5 minutes.")
-                        self.log("Key loading locked for 5 minutes due to too many incorrect password attempts.")
-                        return
+            # Decrypt using DPAPI
+            self.log("Decrypting key with Windows DPAPI...")
+            _, pem = win32crypt.CryptUnprotectData(encrypted_pem, None, None, None, 0)  # Returns (desc, data)
 
-            if not self.private_key:
-                return
+            # Load the private key from decrypted PEM (no password)
+            self.private_key = serialization.load_pem_private_key(
+                pem,
+                password=None,
+                backend=default_backend()
+            )
 
+            # Detect algorithm
+            algo = None
             if isinstance(self.private_key, rsa.RSAPrivateKey):
                 algo = "RSA"
             elif isinstance(self.private_key, ec.EllipticCurvePrivateKey):
@@ -220,49 +185,39 @@ class CodeSignerApp(tb.Window):
                 raise ValueError("Unsupported key type")
 
             self.algo_var.set(algo)
-            self.key_path = key_path
-            self.key_status.config(text=f"✅ {algo} Key loaded from {os.path.basename(key_path)}", bootstyle="success")
+            self.key_status.config(text=f"✅ {algo} Key loaded from {os.path.basename(key_path)} (DPAPI protected)", bootstyle="success")
             self.log(f"Private key loaded from {key_path}. Detected algorithm: {algo}")
 
+            self.key_path = key_path
+
+            # Load signer details if available
             json_path = key_path + '.json'
             if os.path.exists(json_path):
-                with open(json_path, "r") as f:
-                    details = json.load(f)
-                self.country_entry.delete(0, tk.END)
-                self.country_entry.insert(0, details.get("country", "IN"))
-                self.state_entry.delete(0, tk.END)
-                self.state_entry.insert(0, details.get("state", "Karnataka"))
-                self.locality_entry.delete(0, tk.END)
-                self.locality_entry.insert(0, details.get("locality", "Bengaluru"))
-                self.org_entry.delete(0, tk.END)
-                self.org_entry.insert(0, details.get("organization", "MyCompany Pvt Ltd"))
-                self.org_unit_entry.delete(0, tk.END)
-                self.org_unit_entry.insert(0, details.get("org_unit", "Software Division"))
-                self.common_name_entry.delete(0, tk.END)
-                self.common_name_entry.insert(0, details.get("common_name", "My Company Inc."))
-                self.email_entry.delete(0, tk.END)
-                self.email_entry.insert(0, details.get("email", "support@mycompany.com"))
-                self.valid_days_entry.delete(0, tk.END)
-                self.valid_days_entry.insert(0, details.get("valid_days", "365"))
-                self.log(f"Loaded signer details from {json_path}")
+                with open(json_path, 'r') as json_file:
+                    details = json.load(json_file)
+                    self.country_entry.delete(0, tk.END)
+                    self.country_entry.insert(0, details.get('country', 'IN'))
+                    self.state_entry.delete(0, tk.END)
+                    self.state_entry.insert(0, details.get('state', 'Karnataka'))
+                    self.locality_entry.delete(0, tk.END)
+                    self.locality_entry.insert(0, details.get('locality', 'Bengaluru'))
+                    self.org_entry.delete(0, tk.END)
+                    self.org_entry.insert(0, details.get('organization', 'MyCompany Pvt Ltd'))
+                    self.org_unit_entry.delete(0, tk.END)
+                    self.org_unit_entry.insert(0, details.get('org_unit', 'Software Division'))
+                    self.common_name_entry.delete(0, tk.END)
+                    self.common_name_entry.insert(0, details.get('common_name', 'My Company Inc.'))
+                    self.email_entry.delete(0, tk.END)
+                    self.email_entry.insert(0, details.get('email', 'support@mycompany.com'))
+                    self.valid_days_entry.delete(0, tk.END)
+                    self.valid_days_entry.insert(0, details.get('valid_days', '365'))
+                self.log(f"Signer details loaded from {json_path}.")
+            else:
+                self.log("No signer details file found. Using defaults.")
 
         except Exception as e:
-            self.log(f"ERROR loading key: {e}")
+            self.log(f"ERROR loading key: {str(e)}")
             messagebox.showerror("Key Load Error", f"Failed to load key: {str(e)}")
-
-    def update_lock_timer(self):
-        if self.key_lock_until and time.time() < self.key_lock_until:
-            seconds_left = int(self.key_lock_until - time.time())
-            mins, secs = divmod(seconds_left, 60)
-            self.lock_timer_label.config(
-                text=f"Key loading locked. Time left to unlock: {mins:02d}:{secs:02d}"
-            )
-            self.after(1000, self.update_lock_timer)
-        else:
-            if self.lock_timer_label:
-                self.lock_timer_label.destroy()
-                self.lock_timer_label = None
-            self.key_lock_until = None
 
     def generate_key(self):
         try:
@@ -277,83 +232,66 @@ class CodeSignerApp(tb.Window):
 
             if not all([country, state, locality, org, org_unit, common_name, email, valid_days_str]):
                 messagebox.showerror("Error", "All signer details must be filled.")
+                self.log("ERROR: All signer details must be filled.")
                 return
             if not valid_days_str.isdigit() or int(valid_days_str) <= 0:
                 messagebox.showerror("Error", "Validity days must be a positive integer.")
+                self.log("ERROR: Validity days must be a positive integer.")
                 return
 
             algo = self.algo_var.get()
             self.log(f"Generating {algo} keypair...")
             self.private_key = generate_keypair(algo)
 
-            while True:
-                password_str = simpledialog.askstring("Set Password", "Enter password to encrypt the private key (leave blank for none):", show='*')
-                if password_str is None:
-                    self.key_status.config(text=f"✅ {algo} Key generated (not saved)", bootstyle="success")
-                    return
-
-                if password_str == "":
-                    break  # No password, allow
-
-                is_strong, msg = check_password_strength(password_str)
-                if not is_strong:
-                    messagebox.showwarning("Weak Password", msg)
-                    continue  # Ask again
-                else:
-                    messagebox.showinfo("Password Strength", "Password is strong.")
-                    break
-
-            if password_str != "":
-                confirm_str = simpledialog.askstring("Confirm Password", "Confirm password:", show='*')
-                if confirm_str is None:
-                    self.key_status.config(text=f"✅ {algo} Key generated (not saved)", bootstyle="success")
-                    return
-
-                if password_str != confirm_str:
-                    messagebox.showerror("Error", "Passwords do not match")
-                    return
-
-            encryption_algorithm = serialization.BestAvailableEncryption(password_str.encode()) if password_str else serialization.NoEncryption()
-
+            # Serialize private key without password encryption
             pem = self.private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=encryption_algorithm
+                encryption_algorithm=serialization.NoEncryption()
             )
 
+            # Encrypt with DPAPI (user-specific by default)
+            self.log("Encrypting key with Windows DPAPI...")
+            encrypted_pem = win32crypt.CryptProtectData(pem, None, None, None, None, 0)
+
+            # Save details for later
+            details = {
+                "country": country,
+                "state": state,
+                "locality": locality,
+                "organization": org,
+                "org_unit": org_unit,
+                "common_name": common_name,
+                "email": email,
+                "valid_days": valid_days_str
+            }
+
+            # Prompt for save location
             save_path = filedialog.asksaveasfilename(
-                defaultextension=".pem",
-                initialdir=os.path.expanduser("~/Desktop"),
-                filetypes=[("PEM files", "*.pem")],
-                title="Save Private Key As"
+                defaultextension=".key",
+                filetypes=[("Key files", "*.key")],
+                title="Save Protected Private Key"
             )
-            if save_path:
-                with open(save_path, "wb") as f:
-                    f.write(pem)
-                self.log(f"Private key saved to {save_path}.")
-                details = {
-                    "algorithm": algo,
-                    "country": country,
-                    "state": state,
-                    "locality": locality,
-                    "organization": org,
-                    "org_unit": org_unit,
-                    "common_name": common_name,
-                    "email": email,
-                    "valid_days": valid_days_str
-                }
-                json_path = save_path + '.json'
-                with open(json_path, "w") as f:
-                    json.dump(details, f, indent=2)
-                self.log(f"Signer details saved to {json_path}.")
-                self.key_path = save_path
-                self.key_status.config(text=f"✅ {algo} Key generated and saved to {os.path.basename(save_path)}", bootstyle="success")
-            else:
-                self.log("Private key not saved by user.")
+            if not save_path:
+                self.log("Key saving cancelled.")
                 self.key_status.config(text=f"✅ {algo} Key generated (not saved)", bootstyle="success")
+                return
+
+            # Save encrypted key
+            with open(save_path, "wb") as f:
+                f.write(encrypted_pem)
+            self.log(f"Private key saved to {save_path} (DPAPI protected).")
+
+            # Save signer details as JSON
+            json_path = save_path + '.json'
+            with open(json_path, "w") as f:
+                json.dump(details, f, indent=2)
+            self.log(f"Signer details saved to {json_path}.")
+            self.key_path = save_path
+            self.key_status.config(text=f"✅ {algo} Key generated and saved to {os.path.basename(save_path)} (DPAPI protected)", bootstyle="success")
 
         except Exception as e:
-            self.log(f"ERROR generating key: {e}")
+            self.log(f"ERROR generating key: {str(e)}")
             messagebox.showerror("Key Generation Error", str(e))
 
     def choose_file(self):
@@ -362,6 +300,8 @@ class CodeSignerApp(tb.Window):
             self.file_path = path
             self.file_label.config(text=os.path.basename(path))
             self.log(f"File selected: {path}")
+        else:
+            self.log("File selection cancelled.")
 
     def choose_zip(self):
         path = filedialog.askopenfilename(title="Select signed package", filetypes=[("ZIP files", "*.zip")])
@@ -369,14 +309,18 @@ class CodeSignerApp(tb.Window):
             self.zip_path = path
             self.zip_label.config(text=os.path.basename(path))
             self.log(f"Package selected: {path}")
+        else:
+            self.log("Package selection cancelled.")
 
     def sign_file(self):
         if not self.file_path:
             messagebox.showerror("Error", "Select a file first.")
+            self.log("ERROR: No file selected for signing.")
             return
 
         if not self.private_key:
             messagebox.showerror("Error", "No private key loaded. Please load or generate a key first.")
+            self.log("ERROR: No private key loaded.")
             return
 
         country = self.country_entry.get()
@@ -390,88 +334,87 @@ class CodeSignerApp(tb.Window):
 
         if not all([country, state, locality, org, org_unit, common_name, email, valid_days_str]):
             messagebox.showerror("Error", "All signer details must be filled.")
+            self.log("ERROR: All signer details must be filled.")
             return
         if not valid_days_str.isdigit() or int(valid_days_str) <= 0:
             messagebox.showerror("Error", "Validity days must be a positive integer.")
+            self.log("ERROR: Validity days must be a positive integer.")
             return
 
         valid_days = int(valid_days_str)
+        hash_algo = self.hash_algo_var.get().lower().replace("-", "_")  # Convert to "sha3_256" or "sha3_512"
 
         try:
+            self.log(f"Reading file: {self.file_path}")
             with open(self.file_path, "rb") as f:
                 file_bytes = f.read()
 
-            selected_hash = self.sign_hash_algo_var.get()
-            if selected_hash == "SHA3-256":
-                digest = compute_sha3_256(file_bytes)
-                hash_algo_param = "sha3_256"
-            else:
-                digest = compute_sha3_512(file_bytes)
-                hash_algo_param = "sha3_512"
-
+            self.log(f"Computing {hash_algo} digest...")
+            digest = compute_sha3_256(file_bytes) if hash_algo == "sha3_256" else compute_sha3_512(file_bytes)
             algo = self.algo_var.get()
-            self.log(f"Signing digest using {selected_hash}...")
-            sig = sign_digest(self.private_key, algo, digest, hash_algo_param)
 
-            now = datetime.datetime.utcnow()
+            self.log(f"Signing digest with {algo} and {hash_algo}...")
+            sig = sign_digest(self.private_key, algo, digest, hash_algo=hash_algo)
 
             self.log("Creating self-signed certificate...")
-            try:
-                cert = create_self_signed_cert(
-                    private_key=self.private_key,
-                    country=country,
-                    state=state,
-                    locality=locality,
-                    organization=org,
-                    org_unit=org_unit,
-                    common_name=common_name,
-                    email=email,
-                    valid_days=valid_days
-                )
-                cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-            except ValueError as e:
-                import traceback
-                error_details = traceback.format_exc()
-                self.log(f"ERROR: Failed to create certificate: {str(e)}\nFull traceback:\n{error_details}")
-                messagebox.showerror("Signing Error", f"Failed to create certificate: {str(e)}")
-                return
+            cert = create_self_signed_cert(
+                private_key=self.private_key,
+                country=country,
+                state=state,
+                locality=locality,
+                organization=org,
+                org_unit=org_unit,
+                common_name=common_name,
+                email=email,
+                valid_days=valid_days
+            )
+            cert_pem = cert.public_bytes(serialization.Encoding.PEM)
 
             metadata = {
                 "algorithm": algo,
-                "hash_algorithm": selected_hash,
+                "hash_algorithm": hash_algo,
                 "hash": digest.hex(),
                 "signed_by": common_name,
-                "signed_at": now.isoformat()
+                "signed_at": datetime.datetime.utcnow().isoformat()
             }
 
-            file_name = os.path.basename(self.file_path)
-            a = file_name.index('.')
-            file_name = file_name[0:a]
+            self.log("Prompting for ZIP save location...")
             outpath = filedialog.asksaveasfilename(
                 defaultextension=".zip",
-                initialfile=f"signed_{file_name}.zip",
+                initialfile=f"signed_{os.path.basename(self.file_path)}.zip",
                 filetypes=[("ZIP files", "*.zip")]
             )
-            
             if not outpath:
+                self.log("ZIP saving cancelled by user.")
+                self.sign_status.config(text="⚠️ Signing cancelled", bootstyle="warning")
                 return
 
-            with zipfile.ZipFile(outpath, "w") as z:
-                z.writestr(os.path.basename(self.file_path), file_bytes)
-                z.writestr("signature.bin", sig)
-                z.writestr("certificate.pem", cert_pem)
-                z.writestr("metadata.json", json.dumps(metadata, indent=2))
-
-            self.sign_status.config(text="✅ Signed Successfully!", bootstyle="success")
-            self.log(f"Signed {self.file_path} -> {outpath}")
+            self.log(f"Creating ZIP file at {outpath}...")
+            try:
+                with zipfile.ZipFile(outpath, "w", zipfile.ZIP_DEFLATED) as z:
+                    self.log(f"Writing file: {os.path.basename(self.file_path)}")
+                    z.writestr(os.path.basename(self.file_path), file_bytes)
+                    self.log("Writing signature.bin")
+                    z.writestr("signature.bin", sig)
+                    self.log("Writing certificate.pem")
+                    z.writestr("certificate.pem", cert_pem)
+                    self.log("Writing metadata.json")
+                    z.writestr("metadata.json", json.dumps(metadata, indent=2))
+                self.sign_status.config(text="✅ Signed Successfully!", bootstyle="success")
+                self.log(f"Signed {self.file_path} -> {outpath}")
+            except Exception as e:
+                self.log(f"ERROR writing ZIP file: {str(e)}")
+                messagebox.showerror("ZIP Creation Error", f"Failed to create ZIP file: {str(e)}")
+                return
 
         except Exception as e:
-            self.log(f"ERROR: {e}")
+            self.log(f"ERROR during signing: {str(e)}")
             messagebox.showerror("Signing Error", str(e))
 
     def verify_zip(self):
         if not self.zip_path:
             messagebox.showerror("Error", "Select a package first.")
+            self.log("ERROR: No package selected for verification.")
             return
 
         self.details_text.config(state=tk.NORMAL)
@@ -479,68 +422,90 @@ class CodeSignerApp(tb.Window):
         self.details_text.config(state=tk.DISABLED)
 
         try:
+            self.log(f"Opening ZIP file: {self.zip_path}")
             with zipfile.ZipFile(self.zip_path, "r") as z:
                 filenames = z.namelist()
-                required_files = {"signature.bin", "certificate.pem", "metadata.json"}
+                required_files = {"signature.bin", "metadata.json", "certificate.pem"}
                 if not required_files.issubset(filenames):
                     raise FileNotFoundError("Package is missing required signature files.")
 
+                self.log("Reading metadata.json")
                 meta = json.loads(z.read("metadata.json"))
                 algo = meta["algorithm"]
-                hash_algorithm = meta.get("hash_algorithm", "SHA3-256")
+                hash_algo = meta.get("hash_algorithm", "sha3_256")  # Default to sha3_256 for backward compatibility
+                self.log("Reading signature.bin")
                 sig = z.read("signature.bin")
-                cert_pem = z.read("certificate.pem")
-                cert = x509.load_pem_x509_certificate(cert_pem, default_backend())
+                self.log("Reading certificate.pem")
+                cert_data = z.read("certificate.pem")
 
                 content_file_name = [n for n in filenames if n not in required_files][0]
+                self.log(f"Reading content file: {content_file_name}")
                 file_bytes = z.read(content_file_name)
 
-                self.log(f"Verifying {content_file_name} using {algo} with {hash_algorithm}...")
-                if hash_algorithm == "SHA3-256":
-                    digest_to_check = compute_sha3_256(file_bytes)
-                    hash_algo_param = "sha3_256"
-                else:
-                    digest_to_check = compute_sha3_512(file_bytes)
-                    hash_algo_param = "sha3_512"
+                self.log(f"Verifying {content_file_name} using {algo} with {hash_algo}...")
+                digest_to_check = compute_sha3_256(file_bytes) if hash_algo == "sha3_256" else compute_sha3_512(file_bytes)
 
                 if digest_to_check.hex() != meta["hash"]:
                     self.verify_status.config(text="❌ HASH MISMATCH - FILE CORRUPTED!", bootstyle="danger")
                     self.log("Verification FAILED: The file's hash does not match the signed hash.")
                     return
 
-                is_valid = verify_signature(cert.public_key(), algo, digest_to_check, sig, hash_algo_param)
+                self.log("Loading certificate...")
+                cert = x509.load_pem_x509_certificate(cert_data, default_backend())
+                try:
+                    self.log("Verifying signature...")
+                    if algo == "RSA":
+                        cert.public_key().verify(
+                            sig,
+                            digest_to_check,
+                            padding.PSS(
+                                mgf=padding.MGF1(hashes.SHA3_256() if hash_algo == "sha3_256" else hashes.SHA3_512()),
+                                salt_length=padding.PSS.MAX_LENGTH
+                            ),
+                            hashes.SHA3_256() if hash_algo == "sha3_256" else hashes.SHA3_512()
+                        )
+                    elif algo == "ECDSA":
+                        cert.public_key().verify(sig, digest_to_check, ec.ECDSA(hashes.SHA3_256() if hash_algo == "sha3_256" else hashes.SHA3_512()))
+                    else:
+                        raise ValueError("Unsupported algorithm in certificate")
+                    is_valid = True
+                except Exception as e:
+                    is_valid = False
+                    self.log(f"Signature verification failed: {str(e)}")
 
                 if not is_valid:
                     self.verify_status.config(text="❌ Signature INVALID", bootstyle="danger")
                     self.log("Verification FAILED: Signature is invalid.")
                     return
 
+                # Check certificate validity period
                 now = datetime.datetime.utcnow()
-                if now < cert.not_valid_before or now > cert.not_valid_after:
+                if now > cert.not_valid_after:
                     self.verify_status.config(text="❌ Certificate Expired or Not Yet Valid", bootstyle="danger")
                     self.log("Verification FAILED: Certificate is not valid at current time.")
                     return
 
-                self.verify_status.config(text=f"✅ Signature VALID (Signed by: {meta['signed_by']}) | Certificate Valid Until: {cert.not_valid_after.strftime('%Y-%m-%d %H:%M:%S')}", bootstyle="success")
+                self.verify_status.config(text=f"✅ Signature VALID (Signed by: {meta['signed_by']}) | Valid Until: {cert.not_valid_after.strftime('%Y-%m-%d %H:%M:%S')}", bootstyle="success")
                 self.log("Verification SUCCESS: Signature is valid and certificate is within validity period.")
 
+                # Display details in a more user-friendly way
                 self.details_text.config(state=tk.NORMAL)
-                self.details_text.insert(tk.END, "Verification Details:\n\n")
-                self.details_text.insert(tk.END, f"Signing Algorithm: {algo}\n")
-                self.details_text.insert(tk.END, f"Hash Algorithm: {hash_algorithm}\n\n")
+                self.details_text.insert(tk.END, "Certificate Details:\n\n")
                 self.details_text.insert(tk.END, f"Subject: {cert.subject.rfc4514_string()}\n\n")
                 self.details_text.insert(tk.END, f"Issuer: {cert.issuer.rfc4514_string()}\n\n")
                 self.details_text.insert(tk.END, f"Serial Number: {cert.serial_number}\n\n")
                 self.details_text.insert(tk.END, "Validity Period:\n")
                 self.details_text.insert(tk.END, f"  From: {cert.not_valid_before.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 self.details_text.insert(tk.END, f"  To: {cert.not_valid_after.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                #self.details_text.insert(tk.END, "Extensions:\n")
-                #for ext in cert.extensions:
-                 #   self.details_text.insert(tk.END, f"  - {ext.oid._name} (Critical: {ext.critical}): {ext.value}\n")
+                self.details_text.insert(tk.END, f"Signature Algorithm: {cert.signature_hash_algorithm.name}\n\n")
+                self.details_text.insert(tk.END, "Extensions:\n")
+                for ext in cert.extensions:
+                    self.details_text.insert(tk.END, f"  - {ext.oid._name} (Critical: {ext.critical}): {ext.value}\n")
                 self.details_text.insert(tk.END, f"\nSigned At: {meta.get('signed_at', 'N/A')}\n")
                 self.details_text.config(state=tk.DISABLED)
 
         except Exception as e:
-            self.log(f"ERROR: {e}")
-
+            self.log(f"ERROR during verification: {str(e)}")
             messagebox.showerror("Verification Error", str(e))
+
+# main.py remains unchanged
