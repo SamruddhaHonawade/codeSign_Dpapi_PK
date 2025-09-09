@@ -122,33 +122,5 @@ The **verification status** and **detailed certificate information** will be dis
 └── signing.py          # Key generation, signing & verification logic
 ```
 
----
-
-## 🤝 Contributing
-
-Contributions are welcome! 🎉
-If you find a bug or have a suggestion, please **open an issue** or **submit a pull request**.
-
----
-
-## 📜 License
-
-This project is licensed under the **MIT License**.
-See the [LICENSE](LICENSE) file for more details.
-
-```
-
----
-
-### How to Save It:
-1. Create a file named **`README.md`** in the root directory of the project.
-2. Paste the above code.
-3. Save the file.
-
----
-
-If you want, I can also make it **more visually appealing** by adding badges, screenshots, and better formatting to give it a **professional GitHub look**.  
-
-Do you want me to upgrade it into a **pro-level README**?
-```
+--
 
