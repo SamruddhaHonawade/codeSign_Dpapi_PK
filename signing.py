@@ -68,4 +68,4 @@ def verify_signature(public_key, algo: str, digest: bytes, signature: bytes, has
             public_key.verify(signature, digest, ec.ECDSA(hash_class()))
         return True
     except Exception:
-        return False
+        return False
