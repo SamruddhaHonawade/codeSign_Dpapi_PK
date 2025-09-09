@@ -16,6 +16,21 @@ from hashing import compute_sha3_256, compute_sha3_512
 from certificate import create_self_signed_cert
 import time
 import threading
+import re
+
+def check_password_strength(password):
+    """Returns a tuple (is_strong, message) for password strength."""
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters."
+    if not re.search(r"[A-Z]", password):
+        return False, "Password must contain at least one uppercase letter."
+    if not re.search(r"[a-z]", password):
+        return False, "Password must contain at least one lowercase letter."
+    if not re.search(r"[0-9]", password):
+        return False, "Password must contain at least one digit."
+    if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", password):
+        return False, "Password must contain at least one special character."
+    return True, "Strong password."
 
 class CodeSignerApp(tb.Window):
     def __init__(self):
@@ -271,19 +286,32 @@ class CodeSignerApp(tb.Window):
             self.log(f"Generating {algo} keypair...")
             self.private_key = generate_keypair(algo)
 
-            password_str = simpledialog.askstring("Set Password", "Enter password to encrypt the private key (leave blank for none):", show='*')
-            if password_str is None:
-                self.key_status.config(text=f"✅ {algo} Key generated (not saved)", bootstyle="success")
-                return
+            while True:
+                password_str = simpledialog.askstring("Set Password", "Enter password to encrypt the private key (leave blank for none):", show='*')
+                if password_str is None:
+                    self.key_status.config(text=f"✅ {algo} Key generated (not saved)", bootstyle="success")
+                    return
 
-            confirm_str = simpledialog.askstring("Confirm Password", "Confirm password:", show='*')
-            if confirm_str is None:
-                self.key_status.config(text=f"✅ {algo} Key generated (not saved)", bootstyle="success")
-                return
+                if password_str == "":
+                    break  # No password, allow
 
-            if password_str != confirm_str:
-                messagebox.showerror("Error", "Passwords do not match")
-                return
+                is_strong, msg = check_password_strength(password_str)
+                if not is_strong:
+                    messagebox.showwarning("Weak Password", msg)
+                    continue  # Ask again
+                else:
+                    messagebox.showinfo("Password Strength", "Password is strong.")
+                    break
+
+            if password_str != "":
+                confirm_str = simpledialog.askstring("Confirm Password", "Confirm password:", show='*')
+                if confirm_str is None:
+                    self.key_status.config(text=f"✅ {algo} Key generated (not saved)", bootstyle="success")
+                    return
+
+                if password_str != confirm_str:
+                    messagebox.showerror("Error", "Passwords do not match")
+                    return
 
             encryption_algorithm = serialization.BestAvailableEncryption(password_str.encode()) if password_str else serialization.NoEncryption()
 
@@ -416,11 +444,15 @@ class CodeSignerApp(tb.Window):
                 "signed_at": now.isoformat()
             }
 
+            file_name = os.path.basename(self.file_path)
+            a = file_name.index('.')
+            file_name = file_name[0:a]
             outpath = filedialog.asksaveasfilename(
                 defaultextension=".zip",
-                initialfile=f"signed_{os.path.basename(self.file_path)}.zip",
+                initialfile=f"signed_{file_name}.zip",
                 filetypes=[("ZIP files", "*.zip")]
             )
+            
             if not outpath:
                 return
 
