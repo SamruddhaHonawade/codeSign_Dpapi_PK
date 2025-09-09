@@ -5,23 +5,18 @@ from cryptography.hazmat.primitives import serialization
 
 def generate_keypair(algo: str):
     """Generates a private key based on the specified algorithm."""
-    if algo == "RSA(2048)- Fast and Secured":
-        return rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
-            backend=default_backend()
-        )
-    elif algo == "RSA(4096)- Slow and Higly Secured":
-        return rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=4096,
-            backend=default_backend()
-        )
-    elif algo == "ECDSA(256)-Fast and Secured":
-        return ec.generate_private_key(ec.SECP256R1(), backend=default_backend())
-    elif algo == "ECDSA(512)-Slow and Higly Secured":
-        return ec.generate_private_key(ec.SECP521R1(), backend=default_backend())
-    raise ValueError("Unsupported algorithm")
+    try:
+        if algo == "RSA":
+            return rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048,
+                backend=default_backend()
+            )
+        elif algo == "ECDSA":
+            return ec.generate_private_key(ec.SECP256R1(), backend=default_backend())
+        raise ValueError(f"Unsupported algorithm: {algo}")
+    except Exception as e:
+        raise ValueError(f"Failed to generate keypair for {algo}: {str(e)}")
 
 def load_private_key(key_path: str, password: bytes = None):
     """Loads a private key from a PEM file with password protection."""
@@ -73,4 +68,4 @@ def verify_signature(public_key, algo: str, digest: bytes, signature: bytes, has
             public_key.verify(signature, digest, ec.ECDSA(hash_class()))
         return True
     except Exception:
-        return False
+        return False
