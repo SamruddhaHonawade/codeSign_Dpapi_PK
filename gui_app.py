@@ -14,7 +14,8 @@ from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 from signing import generate_keypair, sign_digest, verify_signature, load_private_key
 from hashing import compute_sha3_256, compute_sha3_512
 from certificate import create_self_signed_cert
-
+import time
+import threading
 
 class CodeSignerApp(tb.Window):
     def __init__(self):
@@ -27,6 +28,8 @@ class CodeSignerApp(tb.Window):
         self.zip_path = None
         self.private_key = None
         self.key_path = None
+        self.key_lock_until = None
+        self.lock_timer_label = None  # Add this line
 
         self._create_widgets()
 
@@ -140,6 +143,19 @@ class CodeSignerApp(tb.Window):
 
     def load_key(self):
         try:
+            # Check lockout
+            if self.key_lock_until and time.time() < self.key_lock_until:
+                if not self.lock_timer_label:
+                    self.lock_timer_label = tb.Label(self, text="", bootstyle="danger")
+                    self.lock_timer_label.pack(pady=5)
+                self.update_lock_timer()
+                messagebox.showwarning("Locked", "Too many incorrect password attempts. Please wait until unlock.")
+                self.log("Key loading locked due to too many incorrect password attempts.")
+                return
+            elif self.lock_timer_label:
+                self.lock_timer_label.destroy()
+                self.lock_timer_label = None
+
             desktop_path = os.path.expanduser("~/Desktop")
             key_path = filedialog.askopenfilename(
                 title="Select private key file",
@@ -149,20 +165,45 @@ class CodeSignerApp(tb.Window):
             if not key_path:
                 return
 
-            password_str = simpledialog.askstring("Enter Password", "Enter password for the private key (leave blank if none):", show='*')
-            if password_str is None:
-                return
-            password = password_str.encode() if password_str else None
+            attempts = 0
+            max_attempts = 3
+            while attempts < max_attempts:
+                password_str = simpledialog.askstring(
+                    "Enter Password",
+                    f"Enter password for the private key (attempt {attempts+1}/{max_attempts}, leave blank if none):",
+                    show='*'
+                )
+                if password_str is None:
+                    return
+                password = password_str.encode() if password_str else None
 
-            self.private_key = load_private_key(key_path, password)
-            
+                try:
+                    self.private_key = load_private_key(key_path, password)
+                    break  # Success
+                except Exception as e:
+                    attempts += 1
+                    if attempts < max_attempts:
+                        messagebox.showerror("Incorrect Password", f"Incorrect password. {max_attempts - attempts} attempt(s) left.")
+                    else:
+                        self.key_lock_until = time.time() + 5 * 60  # 5 minutes lock
+                        if not self.lock_timer_label:
+                            self.lock_timer_label = tb.Label(self, text="", bootstyle="danger")
+                            self.lock_timer_label.pack(pady=5)
+                        self.update_lock_timer()
+                        messagebox.showerror("Locked", "Too many incorrect attempts. Locked for 5 minutes.")
+                        self.log("Key loading locked for 5 minutes due to too many incorrect password attempts.")
+                        return
+
+            if not self.private_key:
+                return
+
             if isinstance(self.private_key, rsa.RSAPrivateKey):
                 algo = "RSA"
             elif isinstance(self.private_key, ec.EllipticCurvePrivateKey):
                 algo = "ECDSA"
             else:
                 raise ValueError("Unsupported key type")
-            
+
             self.algo_var.set(algo)
             self.key_path = key_path
             self.key_status.config(text=f"✅ {algo} Key loaded from {os.path.basename(key_path)}", bootstyle="success")
@@ -193,6 +234,20 @@ class CodeSignerApp(tb.Window):
         except Exception as e:
             self.log(f"ERROR loading key: {e}")
             messagebox.showerror("Key Load Error", f"Failed to load key: {str(e)}")
+
+    def update_lock_timer(self):
+        if self.key_lock_until and time.time() < self.key_lock_until:
+            seconds_left = int(self.key_lock_until - time.time())
+            mins, secs = divmod(seconds_left, 60)
+            self.lock_timer_label.config(
+                text=f"Key loading locked. Time left to unlock: {mins:02d}:{secs:02d}"
+            )
+            self.after(1000, self.update_lock_timer)
+        else:
+            if self.lock_timer_label:
+                self.lock_timer_label.destroy()
+                self.lock_timer_label = None
+            self.key_lock_until = None
 
     def generate_key(self):
         try:
