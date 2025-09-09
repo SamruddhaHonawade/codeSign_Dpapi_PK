@@ -46,8 +46,8 @@ pip install -r requirements.txt
 Clone the repository:
 
 ```bash
-git clone https://github.com/your-username/CodeSigner.git
-cd CodeSigner
+git clone https://github.com/your-username/code_signing_with_private_key.git
+cd code_signing_with_private_key
 ```
 
 Install the dependencies:
@@ -123,4 +123,5 @@ The **verification status** and **detailed certificate information** will be dis
 ```
 
 --
+
 
