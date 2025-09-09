@@ -1,6 +1,3 @@
-Here's the complete **Markdown (`README.md`)** code for the description you provided:
-
-````markdown
 # 🔐 CodeSigner: A Python-based Code Signing Tool
 
 This repository contains a **simple, yet functional, code signing and verification tool** built with Python. It allows users to **generate self-signed certificates, digitally sign files, and verify the integrity and authenticity of signed packages**.  
@@ -154,3 +151,4 @@ If you want, I can also make it **more visually appealing** by adding badges, sc
 
 Do you want me to upgrade it into a **pro-level README**?
 ```
+
