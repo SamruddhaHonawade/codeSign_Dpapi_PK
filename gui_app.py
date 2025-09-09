@@ -447,12 +447,13 @@ class CodeSignerApp(tb.Window):
                 self.details_text.insert(tk.END, "Validity Period:\n")
                 self.details_text.insert(tk.END, f"  From: {cert.not_valid_before.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 self.details_text.insert(tk.END, f"  To: {cert.not_valid_after.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                self.details_text.insert(tk.END, "Extensions:\n")
-                for ext in cert.extensions:
-                    self.details_text.insert(tk.END, f"  - {ext.oid._name} (Critical: {ext.critical}): {ext.value}\n")
+                #self.details_text.insert(tk.END, "Extensions:\n")
+                #for ext in cert.extensions:
+                 #   self.details_text.insert(tk.END, f"  - {ext.oid._name} (Critical: {ext.critical}): {ext.value}\n")
                 self.details_text.insert(tk.END, f"\nSigned At: {meta.get('signed_at', 'N/A')}\n")
                 self.details_text.config(state=tk.DISABLED)
 
         except Exception as e:
             self.log(f"ERROR: {e}")
+
             messagebox.showerror("Verification Error", str(e))
