@@ -1,7 +1,3 @@
-# hashing.py remains unchanged
-
-# Modified gui_app.py
-
 import os
 import json
 import zipfile
@@ -71,8 +67,18 @@ class CodeSignerApp(tb.Window):
 
         tb.Label(parent, text="Select Algorithm").pack(pady=(5, 5))
         self.algo_var = tk.StringVar(value="RSA")
-        tb.Combobox(parent, textvariable=self.algo_var, values=["RSA", "ECDSA"],
-                    state="readonly", width=20).pack()
+        algo_combobox = tb.Combobox(parent, textvariable=self.algo_var, values=["RSA", "ECDSA"],
+                                    state="readonly", width=20)
+        algo_combobox.pack()
+        self.algo_var.trace("w", self.update_key_options)
+
+        # Key size/curve selection
+        self.key_label = tb.Label(parent, text="Select Key Size (bits) - Standard: 2048, High: 3072, Ultra: 4096")
+        self.key_label.pack(pady=(5, 5))
+        self.key_param_var = tk.StringVar(value="2048")
+        self.key_param_combobox = tb.Combobox(parent, textvariable=self.key_param_var, values=["2048", "3072", "4096"],
+                                              state="readonly", width=30)
+        self.key_param_combobox.pack()
 
         # Signer details
         details_frame = tb.LabelFrame(parent, text="Signer Details", bootstyle="info")
@@ -120,6 +126,17 @@ class CodeSignerApp(tb.Window):
 
         tb.Button(parent, text="Generate Key", bootstyle="success",
                   command=self.generate_key).pack(pady=10)
+
+    def update_key_options(self, *args):
+        algo = self.algo_var.get()
+        if algo == "RSA":
+            self.key_param_combobox['values'] = ["2048", "3072", "4096"]
+            self.key_param_var.set("2048")
+            self.key_label.config(text="Select Key Size (bits) - Standard: 2048, High: 3072, Ultra: 4096")
+        else:  # ECDSA
+            self.key_param_combobox['values'] = ["SECP256R1", "SECP384R1", "SECP521R1"]
+            self.key_param_var.set("SECP256R1")
+            self.key_label.config(text="Select Curve - Standard: SECP256R1, High: SECP384R1, Ultra: SECP521R1")
 
     def _create_sign_tab(self, parent):
         self.file_label = tb.Label(parent, text="No file selected", bootstyle="secondary")
@@ -178,7 +195,7 @@ class CodeSignerApp(tb.Window):
                 backend=default_backend()
             )
 
-            # Detect algorithm
+            # Detect alg
             algo = None
             if isinstance(self.private_key, rsa.RSAPrivateKey):
                 algo = "RSA"
@@ -243,17 +260,18 @@ class CodeSignerApp(tb.Window):
                 return
 
             algo = self.algo_var.get()
-            self.log(f"Generating {algo} keypair...")
-            self.private_key = generate_keypair(algo)
+            key_param = self.key_param_var.get()
+            self.log(f"Generating {algo} keypair with param {key_param}...")
+            self.private_key = generate_keypair(algo, key_param)
 
-            # Serialize private key without password encryption
+            # Serialize private key without password-based encryption
             pem = self.private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption()
             )
 
-            # Encrypt with DPAPI (user-specific by default)
+            # Encrypt with DPAPI (user-specific)
             self.log("Encrypting key with Windows DPAPI...")
             encrypted_pem = win32crypt.CryptProtectData(pem, None, None, None, None, 0)
 
@@ -510,9 +528,3 @@ class CodeSignerApp(tb.Window):
         except Exception as e:
             self.log(f"ERROR during verification: {str(e)}")
             messagebox.showerror("Verification Error", str(e))
-
-# signing.py remains unchanged, but note that load_private_key is no longer used for DPAPI; handling is now in gui_app.py
-
-# certificate.py remains unchanged
-
-# main.py remains unchanged
