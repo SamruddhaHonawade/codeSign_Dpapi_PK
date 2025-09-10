@@ -3,23 +3,30 @@ from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 
-def generate_keypair(algo: str):
-    """Generates a private key based on the specified algorithm."""
+def generate_keypair(algo: str, key_param: str):
     try:
         if algo == "RSA":
+            key_size = int(key_param)
             return rsa.generate_private_key(
                 public_exponent=65537,
-                key_size=2048,
+                key_size=key_size,
                 backend=default_backend()
             )
         elif algo == "ECDSA":
-            return ec.generate_private_key(ec.SECP256R1(), backend=default_backend())
+            if key_param == "SECP256R1":
+                curve = ec.SECP256R1()
+            elif key_param == "SECP384R1":
+                curve = ec.SECP384R1()
+            elif key_param == "SECP521R1":
+                curve = ec.SECP521R1()
+            else:
+                raise ValueError(f"Unsupported curve: {key_param}")
+            return ec.generate_private_key(curve, backend=default_backend())
         raise ValueError(f"Unsupported algorithm: {algo}")
     except Exception as e:
         raise ValueError(f"Failed to generate keypair for {algo}: {str(e)}")
 
 def load_private_key(key_path: str, password: bytes = None):
-    """Loads a private key from a PEM file with password protection."""
     try:
         with open(key_path, "rb") as key_file:
             private_key = serialization.load_pem_private_key(
